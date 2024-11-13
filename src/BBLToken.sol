@@ -21,23 +21,24 @@ contract ERC20 is IERC20 {
 
     string public name;
     string public symbol;
-    uint8 public immutable decimals;
+    uint256 public immutable decimals;
     uint256 public totalSupply;
 
     uint256 internal immutable INITIAL_CHAIN_ID;
     bytes32 internal immutable INITIAL_DOMAIN_SEPARATOR;
 
-    address public treasury;
-    address public relayer; // Auto Reward Task Relayer
+    address public admin;
+    uint256 public currentTaskId;
 
     struct Task {
-        uint80 id;
-        address taskAdmin; // uint160
-        uint8 role; // 0 bbl, 1 prof, 2 team leader
+        address taskCreator; // uint160
         uint8 taskType;
-        uint256 reward;
-        string name;
-        string description;
+        uint88 reward;
+    }
+
+    struct User {
+        uint128 role; // 0 - user, 1 - admin, 2 - professor, 3 - team leader
+        uint128 nonce;
     }
 
     // add teams
@@ -45,70 +46,70 @@ contract ERC20 is IERC20 {
     // organize by team leader 
     // bbl - prof - team leaders
 
-    // attach emails to addresses 
-
-    mapping(address => uint256) public nonces;
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
+    mapping(address => User) public users;
     mapping(uint256 => Task) public tasks; // id <> Task
-    mapping(bytes32 => address) public userIdentifier;
-    mapping(bytes32 => mapping(uint256 => uint256)) public userTaskRecord; // user <> id <> boolean
+    mapping(address => mapping(uint256 => uint256)) public userTaskRecord; // user <> task id <> boolean
 
     constructor(
         string memory _name,
         string memory _symbol,
-        uint8 _decimals,
-        address _treasury,
-        uint256 amount
+        address _admin
     ) {
         name = _name;
         symbol = _symbol;
-        decimals = _decimals;
+        decimals = 6;
+
+        admin = _admin;
+        users[_admin].role = 1;
 
         INITIAL_CHAIN_ID = block.chainid;
         INITIAL_DOMAIN_SEPARATOR = computeDomainSeparator();
 
-        treasury = _treasury;
-
-        _mint(msg.sender, (amount ** _decimals));
+        _mint(_admin, (10**7) * (10**decimals));
     }
 
-    function setTreasury(address newTreasury) external {
-        if(msg.sender != treasury) revert FORBIDDEN();
-        treasury = newTreasury;
+    function getRole(address user) external view returns (uint128) {
+        return users[user].role;
     }
 
-    function setRelayer(address newRelayer) external {
-        if(msg.sender != treasury || msg.sender != relayer) revert FORBIDDEN();
-        relayer = newRelayer;
+    function setRole(address _user, uint8 _role) external {
+        User storage user = users[_user];
+        User memory requester = users[msg.sender];
+        if(_role <= 0 && (msg.sender != admin || requester.role <= _role)) revert FORBIDDEN();
+        user.role = _role;
+    }
+
+    function setAdmin(address newAdmin) external {
+        if(msg.sender != admin) revert FORBIDDEN();
+        admin = newAdmin;
     }
 
     function issueTokens(uint256 amount) external {
-        if(msg.sender != treasury) revert FORBIDDEN();
-        _mint(treasury, amount);
+        if(msg.sender != admin) revert FORBIDDEN();
+        _mint(admin, amount);
     }
 
-    function reallocateUserTokens(bytes32 userId, address userNewAddress) external {
-        if(msg.sender != treasury) revert FORBIDDEN();
-        address userOldAddress = userIdentifier[userId];
+    function reallocateUserTokens(address userOldAddress, address userNewAddress) external {
+        if(msg.sender != admin) revert FORBIDDEN();
         uint256 amt = balanceOf[userOldAddress];
         _burn(userOldAddress, amt);
         _mint(userNewAddress, amt);
-        userIdentifier[userId] = userNewAddress;
     }
 
-    function sendReward(bytes32 userId, uint256 taskId) external {
-        if(msg.sender != relayer) revert FORBIDDEN();
+    function sendReward(address user, uint256 taskId) external {
+        if(msg.sender != admin) revert FORBIDDEN();
         
         Task memory task = tasks[taskId];
         if(task.taskType != 0) revert INVALID_TASK_TYPE();
 
         uint256 reward = task.reward;
-        if(userTaskRecord[userId][taskId] == 1) revert INVALID_TASK();
+        if(userTaskRecord[user][taskId] == 1) revert INVALID_TASK();
 
-        userTaskRecord[userId][taskId] = 1;
-        transfer(userIdentifier[userId], reward);
+        userTaskRecord[user][taskId] = 1;
+        transfer(user, reward);
     }
 
     /////////////////////////////////////////////////////////////////////
@@ -150,6 +151,7 @@ contract ERC20 is IERC20 {
         return true;
     }
 
+
     function permit(
         address owner,
         address spender,
@@ -160,6 +162,8 @@ contract ERC20 is IERC20 {
         bytes32 s
     ) public virtual {
         require(deadline >= block.timestamp, "PERMIT_DEADLINE_EXPIRED");
+        User storage user = users[owner];
+        uint128 nonce = user.nonce;
 
         unchecked {
             address recoveredAddress = ecrecover(
@@ -175,7 +179,7 @@ contract ERC20 is IERC20 {
                                 owner,
                                 spender,
                                 value,
-                                nonces[owner]++,
+                                uint256(nonce),
                                 deadline
                             )
                         )
@@ -185,6 +189,8 @@ contract ERC20 is IERC20 {
                 r,
                 s
             );
+
+            user.nonce = nonce + 1;
 
             require(recoveredAddress != address(0) && recoveredAddress == owner, "INVALID_SIGNER");
 
